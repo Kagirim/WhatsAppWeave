@@ -13,21 +13,21 @@ import makeWASocket, {
 import MAIN_LOGGER from '@whiskeysockets/baileys/lib/Utils/logger'
 import NodeCache from 'node-cache'
 import dotenv from 'dotenv';
-import { decryptVote } from './utils/poll/decrypt';
-import { downloadMedia } from './utils/media/downloadMedia';
-import { updatePoll, createPoll } from './utils/poll/update';
-import { connect } from './utils/db/db';
-import { PollRepository } from './utils/db/repository';
+import { decryptVote } from './poll/decrypt';
+import { downloadMedia } from './media/downloadMedia';
+import { updatePoll, createPoll } from './poll/update';
+import { connect } from './db/db';
+import { PollRepository } from './db/repository';
 
 
 console.clear();
 
 // group ids
-const groups_ids = process.env.GROUP_JIDS!.split(',');
+// const groups_ids = process.env.GROUP_JIDS!.split(',');
 
 // create a logger
 const logger = MAIN_LOGGER.child({});
-logger.level = "debug";
+logger.level = "silent";
 
 // load env variables
 dotenv.config();
@@ -95,37 +95,97 @@ const startSock = async () => {
             const { messages } = events['messages.upsert'];
             console.log(`message received from ${messages[0].pushName}`);
 
-            if (groups_ids.includes(messages[0]?.key?.remoteJid!)) {
-                // get protocol message
-                const protocolMessage = messages[0].message?.protocolMessage;
+            // get protocol message
+            const protocolMessage = messages[0].message?.protocolMessage;
 
-                if (protocolMessage) {
-                    console.log('protocol message received');
-                    // process the history message
-                    const historyData = await downloadAndProcessHistorySyncNotification(protocolMessage.historySyncNotification!, {})
+            // get text message
+            if (messages[0].message){
+                console.log(messages[0].message)
+            }
 
-                    sock.ev.emit('messaging-history.set', { ...historyData, isLatest: true}) 
+            if (protocolMessage) {
+                console.log('protocol message received');
+                // process the history message
+                // const historyData = await downloadAndProcessHistorySyncNotification(protocolMessage.historySyncNotification!, {})
+
+                // sock.ev.emit('messaging-history.set', { ...historyData, isLatest: true}) 
+            }
+
+            // download the media
+            if (messages[0].message?.audioMessage || messages[0].message?.videoMessage || messages[0].message?.imageMessage || messages[0].message?.stickerMessage) {
+                await downloadMedia(messages[0])
+            }
+
+            // get poll info from the message
+            if (messages[0].message?.pollUpdateMessage) {
+                // get poll info
+                const meId = sock.user?.id;
+                const pollMsg = messages[0].message?.pollUpdateMessage;
+                const creationMsgKey = pollMsg.pollCreationMessageKey!;
+                const pollCreationMsg = await getMessage(creationMsgKey);
+
+                // decrypt poll
+                try {
+                    await decryptVote(
+                        pollMsg,
+                        pollCreationMsg!,
+                        messages[0],
+                        sock.ev,
+                        meId!
+                    );
+
+                } catch (error) {
+                    console.log('error', error);
                 }
+            }
 
-                // download the media
-                if (messages[0].message?.audioMessage || messages[0].message?.videoMessage || messages[0].message?.imageMessage || messages[0].message?.stickerMessage) {
-                    await downloadMedia(messages[0])
+            if (messages[0].message?.pollCreationMessage) {
+                // get poll info
+                const pollId = messages[0].key.id!;
+                const question = messages[0].message?.pollCreationMessage?.name!;
+                const votes = messages[0].message?.pollCreationMessage?.options!.map((option) => {
+                    return {
+                        option: option.optionName,
+                        voters: []
+                    }
                 }
+                );
 
-                // get poll info from the message
-                if (messages[0].message?.pollUpdateMessage) {
+                // create poll
+                await createPoll(
+                    pollRepository,
+                    pollId,
+                    question,
+                    votes,
+                );
+            
+            }
+        }
+
+        // message history received
+        if (events['messaging-history.set']) {
+            const { messages, chats } = events['messaging-history.set'];
+            console.log('history received');
+            console.log(messages)
+
+        for (const message of messages) {
+                if (message.message?.audioMessage || message.message?.videoMessage || message.message?.imageMessage || message.message?.stickerMessage) {
+                    await downloadMedia(message)!
+                }
+                
+                if (message.message?.pollUpdateMessage) {
                     // get poll info
                     const meId = sock.user?.id;
-                    const pollMsg = messages[0].message?.pollUpdateMessage;
+                    const pollMsg = message.message?.pollUpdateMessage!;
                     const creationMsgKey = pollMsg.pollCreationMessageKey!;
                     const pollCreationMsg = await getMessage(creationMsgKey);
 
                     // decrypt poll
                     try {
                         await decryptVote(
-                            pollMsg,
+                            pollMsg!,
                             pollCreationMsg!,
-                            messages[0],
+                            message,
                             sock.ev,
                             meId!
                         );
@@ -135,11 +195,11 @@ const startSock = async () => {
                     }
                 }
 
-                if (messages[0].message?.pollCreationMessage) {
+                if (message.message?.pollCreationMessage) {
                     // get poll info
-                    const pollId = messages[0].key.id!;
-                    const question = messages[0].message?.pollCreationMessage?.name!;
-                    const votes = messages[0].message?.pollCreationMessage?.options!.map((option) => {
+                    const pollId = message.key.id!;
+                    const question = message.message?.pollCreationMessage?.name!;
+                    const votes = message.message?.pollCreationMessage?.options!.map((option) => {
                         return {
                             option: option.optionName,
                             voters: []
@@ -154,66 +214,8 @@ const startSock = async () => {
                         question,
                         votes,
                     );
-                
                 }
-            }
-        }
-
-        // message history received
-        if (events['messaging-history.set']) {
-            const { messages, chats } = events['messaging-history.set'];
-            console.log('history received');
-
-            for (const message of messages) {
-                if (groups_ids.includes(message.key.remoteJid!) ) {
-                    if (message.message?.audioMessage || message.message?.videoMessage || message.message?.imageMessage || message.message?.stickerMessage) {
-                        await downloadMedia(message)
-                    }
-                    
-                    if (message.message?.pollUpdateMessage) {
-                        // get poll info
-                        const meId = sock.user?.id;
-                        const pollMsg = message.message?.pollUpdateMessage!;
-                        const creationMsgKey = pollMsg.pollCreationMessageKey!;
-                        const pollCreationMsg = await getMessage(creationMsgKey);
-
-                        // decrypt poll
-                        try {
-                            await decryptVote(
-                                pollMsg!,
-                                pollCreationMsg!,
-                                message,
-                                sock.ev,
-                                meId!
-                            );
-
-                        } catch (error) {
-                            console.log('error', error);
-                        }
-                    }
-
-                    if (message.message?.pollCreationMessage) {
-                        // get poll info
-                        const pollId = message.key.id!;
-                        const question = message.message?.pollCreationMessage?.name!;
-                        const votes = message.message?.pollCreationMessage?.options!.map((option) => {
-                            return {
-                                option: option.optionName,
-                                voters: []
-                            }
-                        }
-                        );
-
-                        // create poll
-                        await createPoll(
-                            pollRepository,
-                            pollId,
-                            question,
-                            votes,
-                        );
-                    }
-                };
-            }
+            };
         }
 
         // get message update events
@@ -256,31 +258,30 @@ const startSock = async () => {
         console.log('history received');
 
         for (const message of messages) {
-            if (groups_ids.includes(message.key.remoteJid!)) {
-                if (message.message?.audioMessage || message.message?.videoMessage || message.message?.imageMessage || message.message?.stickerMessage) {
-                    await downloadMedia(message)
+            console.log(message)
+            if (message.message?.audioMessage || message.message?.videoMessage || message.message?.imageMessage || message.message?.stickerMessage) {
+                await downloadMedia(message)!
 
-                } else if (message.message?.pollUpdateMessage) {
-                    console.log(message)
-                    // get poll info
-                    const meId = sock.user?.id;
-                    const pollMsg = message.message?.pollUpdateMessage!;
-                    const creationMsgKey = pollMsg.pollCreationMessageKey!; 
-                    const pollCreationMsg = await getMessage(creationMsgKey); // Await the getMessage function call
+            } else if (message.message?.pollUpdateMessage) {
+                console.log(message)
+                // get poll info
+                const meId = sock.user?.id;
+                const pollMsg = message.message?.pollUpdateMessage!;
+                const creationMsgKey = pollMsg.pollCreationMessageKey!; 
+                const pollCreationMsg = await getMessage(creationMsgKey); // Await the getMessage function call
 
-                    // decrypt poll
-                    try {
-                        await decryptVote(
-                            pollMsg!,
-                            pollCreationMsg!,
-                            message,
-                            sock.ev,
-                            meId!
-                        );
+                // decrypt poll
+                try {
+                    await decryptVote(
+                        pollMsg!,
+                        pollCreationMsg!,
+                        message,
+                        sock.ev,
+                        meId!
+                    );
 
-                    } catch (error) {
-                        console.log('error', error);
-                    }
+                } catch (error) {
+                    console.log('error', error);
                 }
             }
         }
